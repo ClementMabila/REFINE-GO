@@ -1,0 +1,20 @@
+# Existing Django requirements...
+django>=4.2.0
+djangorestframework>=3.14.0
+
+# New requirements for real data integration
+googlemaps>=4.10.0
+requests>=2.31.0
+celery>=5.3.0
+redis>=4.6.0
+django-redis>=5.3.0
+django-ratelimit>=4.1.0
+geopy>=2.3.0
+beautifulsoup4>=4.12.0  # For web scraping if needed
+python-decouple>=3.8  # For environment variable management
+
+# Background task processing
+celery[redis]>=5.3.0
+
+# Monitoring and logging
+sentry-sdk>=1.32.0  # Optional: for error tracking
