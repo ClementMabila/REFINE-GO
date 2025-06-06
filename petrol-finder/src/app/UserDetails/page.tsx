@@ -27,7 +27,7 @@ const EditProfilePage = () => {
   const [showFuelDropdown, setShowFuelDropdown] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://refine-go.onrender.com/api';
+  const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://refine-go.onrender.com';
 
   const fuelTypes = [
     'Petrol',
