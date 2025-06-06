@@ -139,7 +139,10 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # CORS Configuration
 CORS_ALLOW_ALL_ORIGINS = os.environ.get('CORS_ALLOW_ALL_ORIGINS', 'False').lower() == 'true'
 CORS_ALLOWED_ORIGINS = os.environ.get(
-    'CORS_ALLOWED_ORIGINS', 
+    'CORS_ALLOWED_ORIGINS',
+    'https://refine-86km4zg4l-clementmabilas-projects.vercel.app',
+    'https://refine-go.vercel.app/',
+    'https://refine-86km4zg4l-clementmabilas-projects.vercel.app/',
     'http://localhost:3000,http://127.0.0.1:3000'
 ).split(',')
 CORS_ALLOW_CREDENTIALS = True
