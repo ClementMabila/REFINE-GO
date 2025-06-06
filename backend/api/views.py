@@ -1,13 +1,17 @@
-from rest_framework.decorators import api_view, action
+from rest_framework.decorators import api_view, action, permission_classes
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework import filters
 from rest_framework import viewsets
 from rest_framework import permissions
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework import serializers
+from rest_framework import generics
+from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
 from django.core.mail import send_mail
-from django.contrib.auth import get_user_model, authenticate
+from django.contrib.auth import get_user_model, authenticate, login, logout
+from django.contrib.auth.hashers import make_password
 from .models import EmailOTP
 import random
 from django.utils import timezone
@@ -26,15 +30,20 @@ from datetime import datetime, timedelta
 import json
 import re
 import traceback
-from django.db import transaction
+from django.db import transaction, IntegrityError
 import math
 from typing import List, Dict
+from django.views.decorators.csrf import ensure_csrf_cookie, csrf_exempt
+from django.views.decorators.http import require_http_methods
+from django.http import JsonResponse
+from django.middleware.csrf import get_token
 from .models import (
     User, Vehicle, FuelCompany, PetrolStation, StationAmenity,
     FuelType, FuelPrice, StationTraffic, UserVisit, Review,
     ReviewImage, Favorite, PriceAlert, FuelTransaction,
     TripPlan, RefuelStop, StationReport, Notification,
-    PromotionCampaign, StationPromotion, UserSubscription
+    PromotionCampaign, StationPromotion, UserSubscription,
+    UserProfile, Trip
 )
 from .serializers import (
     UserSerializer, VehicleSerializer, FuelCompanySerializer,
@@ -44,13 +53,16 @@ from .serializers import (
     FavoriteSerializer, PriceAlertSerializer, FuelTransactionSerializer,
     TripPlanSerializer, RefuelStopSerializer, StationReportSerializer,
     NotificationSerializer, PromotionCampaignSerializer,
-    StationPromotionSerializer, UserSubscriptionSerializer
+    StationPromotionSerializer, UserSubscriptionSerializer,
+    UserProfileSerializer, TripSerializer, FavoriteStationSerializer, ProfileSerializer
 )
 
 import logging
 import time
 from collections import defaultdict
 import numpy as np
+import calendar
+
 logger = logging.getLogger(__name__)
 
 # Add this import or definition for GooglePlacesService
@@ -59,120 +71,1583 @@ from .services.fuel_price_service import FuelPriceService
 
 User = get_user_model()
 
+@api_view(['GET'])
+@permission_classes([AllowAny])
+@ensure_csrf_cookie
+def get_csrf_token(request):
+    """
+    Get CSRF token for frontend authentication
+    """
+    csrf_token = get_token(request)
+    return JsonResponse({
+        'csrfToken': csrf_token,
+        'success': True
+    })
+
+from django.core.mail import EmailMultiAlternatives
+
+def send_login_verification_email(email, otp):
+    subject = 'RefineGo - Login Verification Code'
+
+    html_content = f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                body {{ 
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif; 
+                    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); 
+                    margin: 0; 
+                    padding: 24px; 
+                    line-height: 1.6;
+                }}
+                .container {{ 
+                    max-width: 640px; 
+                    margin: 0 auto; 
+                    background: white; 
+                    border-radius: 20px; 
+                    overflow: hidden; 
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.08);
+                    border: 1px solid rgba(0,0,0,0.06);
+                }}
+                .header {{ 
+                    background: linear-gradient(135deg, #2edda2 0%, #22c55e 50%, #16a34a 100%); 
+                    padding: 48px 40px 40px; 
+                    text-align: center; 
+                    position: relative;
+                    overflow: hidden;
+                }}
+                .header::before {{
+                    content: '';
+                    position: absolute;
+                    top: -50%;
+                    left: -50%;
+                    width: 200%;
+                    height: 200%;
+                    background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+                    animation: shimmer 3s ease-in-out infinite;
+                }}
+                @keyframes shimmer {{
+                    0%, 100% {{ opacity: 0; }}
+                    50% {{ opacity: 1; }}
+                }}
+                .logo-container {{
+                    text-align: center;
+                    margin-bottom: 12px;
+                    position: relative;
+                    z-index: 2;
+                }}
+                .app-name {{ 
+                    color: white; 
+                    font-size: 36px; 
+                    font-weight: 800; 
+                    letter-spacing: -0.8px;
+                    text-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    margin-bottom: 8px;
+                }}
+                .tagline {{ 
+                    color: rgba(255,255,255,0.85); 
+                    font-size: 14px; 
+                    font-weight: 400;
+                    letter-spacing: 0.5px;
+                    text-transform: uppercase;
+                    position: relative;
+                    z-index: 2;
+                }}
+                .subtitle {{ 
+                    color: rgba(255,255,255,0.9); 
+                    font-size: 16px; 
+                    font-weight: 500;
+                    position: relative;
+                    z-index: 2;
+                    margin-top: 16px;
+                }}
+                .content {{ 
+                    padding: 56px 48px; 
+                    text-align: center; 
+                }}
+                .title {{ 
+                    font-size: 28px; 
+                    font-weight: 700; 
+                    color: #0f172a; 
+                    margin-bottom: 16px;
+                    letter-spacing: -0.3px;
+                }}
+                .text {{ 
+                    font-size: 18px; 
+                    color: #64748b; 
+                    margin-bottom: 40px; 
+                    max-width: 480px;
+                    margin-left: auto;
+                    margin-right: auto;
+                }}
+                .code-container {{
+                    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+                    border: 2px solid #e2e8f0;
+                    border-radius: 20px;
+                    padding: 40px 32px;
+                    margin: 44px 0;
+                    position: relative;
+                    overflow: hidden;
+                }}
+                .code-container::before {{
+                    content: '';
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    height: 4px;
+                    background: linear-gradient(90deg, #2edda2, #22c55e, #16a34a);
+                }}
+                .code-label {{ 
+                    font-size: 14px; 
+                    color: #64748b; 
+                    font-weight: 600; 
+                    margin-bottom: 16px;
+                    text-transform: uppercase;
+                    letter-spacing: 1px;
+                }}
+                .code {{ 
+                    font-size: 48px; 
+                    font-weight: 800; 
+                    color: #2edda2; 
+                    letter-spacing: 12px; 
+                    font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+                    text-shadow: 0 2px 4px rgba(46,221,162,0.2);
+                }}
+                .security-note {{ 
+                    background: linear-gradient(135deg, rgba(46,221,162,0.1) 0%, rgba(34,197,94,0.1) 100%); 
+                    border: 1px solid rgba(46,221,162,0.3); 
+                    border-radius: 16px; 
+                    padding: 24px 28px; 
+                    margin: 36px 0; 
+                    color: #059669; 
+                    font-weight: 600;
+                    display: flex;
+                    align-items: center;
+                    gap: 12px;
+                }}
+                .security-note::before {{
+                    content: '🔒';
+                    font-size: 20px;
+                }}
+                .footer {{ 
+                    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%); 
+                    padding: 32px 48px; 
+                    text-align: center; 
+                    font-size: 14px; 
+                    color: #64748b;
+                    border-top: 1px solid #e2e8f0;
+                }}
+                .footer-links {{
+                    margin-bottom: 16px;
+                }}
+                .footer-link {{
+                    color: #2edda2;
+                    text-decoration: none;
+                    font-weight: 500;
+                    margin: 0 12px;
+                }}
+                .footer-link:hover {{
+                    text-decoration: underline;
+                }}
+                .copyright {{
+                    font-size: 13px;
+                    color: #94a3b8;
+                }}
+                
+                @media (max-width: 600px) {{
+                    body {{ padding: 16px; }}
+                    .content {{ padding: 40px 24px; }}
+                    .header {{ padding: 40px 24px 32px; }}
+                    .app-name {{ font-size: 28px; }}
+                    .title {{ font-size: 24px; }}
+                    .text {{ font-size: 16px; }}
+                    .code {{ font-size: 40px; letter-spacing: 8px; }}
+                    .footer {{ padding: 24px; }}
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <div class="logo-container">
+                        <div class="app-name">RefineGo</div>
+                        <div class="tagline">Excellence in Digital Solutions</div>
+                    </div>
+                    <div class="subtitle">Intelligent Authentication Platform</div>
+                </div>
+                <div class="content">
+                    <div class="title">Your Secure Access Code</div>
+                    <div class="text">
+                        We've generated a secure verification code for your RefineGo account login. 
+                        Enter this code to complete your authentication process.
+                    </div>
+                    <div class="code-container">
+                        <div class="code-label">Verification Code</div>
+                        <div class="code">{otp}</div>
+                    </div>
+                    <div class="security-note">
+                        This code will expire in 10 minutes for your security.
+                    </div>
+                </div>
+                <div class="footer">
+                    <div class="footer-links">
+                        <a href="#" class="footer-link">Security Center</a>
+                        <a href="#" class="footer-link">Support</a>
+                        <a href="#" class="footer-link">Account Settings</a>
+                    </div>
+                    <div class="copyright">
+                        If you didn't request this code, please secure your account immediately.<br/>
+                        &copy; 2024 RefineGo Technologies. All rights reserved.
+                    </div>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+    text_content = f"""
+    RefineGo Login Code
+
+    Use the code below to complete your login:
+
+    {otp}
+
+    This code will expire in 10 minutes.
+
+    Didn't request this? Please ignore this message or secure your account.
+    """
+
+    msg = EmailMultiAlternatives(subject, text_content, 'RefineGo <noreply@refinego.com>', [email])
+    msg.attach_alternative(html_content, "text/html")
+    msg.send(fail_silently=False)
+
+def send_forgotpass_email(email, otp):
+    subject = 'RefineGo - Your Password Reset Code'
+
+    html_content = f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>RefineGo - Password Reset</title>
+            <style>
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                    margin: 0; 
+                    padding: 0; 
+                    background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+                    min-height: 100vh;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }}
+                .container {{
+                    max-width: 520px; 
+                    margin: 20px; 
+                    background-color: #ffffff;
+                    border-radius: 24px; 
+                    overflow: hidden;
+                    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.12), 0 4px 16px rgba(0, 0, 0, 0.08);
+                    border: 1px solid rgba(0, 0, 0, 0.05);
+                }}
+                .header {{
+                    background: linear-gradient(135deg, #2edda2 0%, #22c55e 50%, #16a34a 100%);
+                    padding: 40px 30px 36px; 
+                    text-align: center; 
+                    color: #ffffff;
+                    position: relative;
+                    overflow: hidden;
+                }}
+                .header::before {{
+                    content: '';
+                    position: absolute;
+                    top: -50%;
+                    left: -50%;
+                    width: 200%;
+                    height: 200%;
+                    background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+                    animation: shimmer 4s ease-in-out infinite;
+                }}
+                @keyframes shimmer {{
+                    0%, 100% {{ opacity: 0; transform: rotate(0deg); }}
+                    50% {{ opacity: 1; transform: rotate(180deg); }}
+                }}
+                .icon {{
+                    width: 64px; 
+                    height: 64px;
+                    margin: 0 auto 20px;
+                    background: rgba(255, 255, 255, 0.2);
+                    border: 2px solid rgba(255, 255, 255, 0.3);
+                    border-radius: 20px;
+                    display: flex; 
+                    align-items: center; 
+                    justify-content: center;
+                    font-size: 28px;
+                    backdrop-filter: blur(10px);
+                    position: relative;
+                    z-index: 2;
+                }}
+                .brand-container {{
+                    position: relative;
+                    z-index: 2;
+                }}
+                .title {{
+                    font-size: 32px; 
+                    font-weight: 800; 
+                    margin: 0 0 8px;
+                    letter-spacing: -0.5px;
+                    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+                }}
+                .tagline {{
+                    font-size: 14px; 
+                    opacity: 0.9;
+                    font-weight: 500;
+                    letter-spacing: 0.5px;
+                    text-transform: uppercase;
+                }}
+                .content {{
+                    padding: 48px 40px; 
+                    text-align: center;
+                }}
+                .content-title {{
+                    font-size: 26px; 
+                    font-weight: 700; 
+                    margin-bottom: 16px;
+                    color: #0f172a;
+                    letter-spacing: -0.3px;
+                }}
+                .content-text {{
+                    font-size: 17px; 
+                    color: #64748b; 
+                    margin-bottom: 36px;
+                    line-height: 1.6;
+                    max-width: 420px;
+                    margin-left: auto;
+                    margin-right: auto;
+                }}
+                .reset-button {{
+                    display: inline-block;
+                    background: linear-gradient(135deg, #2edda2 0%, #22c55e 100%);
+                    color: white;
+                    text-decoration: none;
+                    font-weight: 700;
+                    font-size: 16px;
+                    padding: 18px 40px;
+                    border-radius: 16px;
+                    margin: 20px 0 32px;
+                    box-shadow: 0 8px 24px rgba(46, 221, 162, 0.3);
+                    transition: all 0.3s ease;
+                    letter-spacing: 0.5px;
+                    text-transform: uppercase;
+                }}
+                .reset-button:hover {{
+                    transform: translateY(-2px);
+                    box-shadow: 0 12px 32px rgba(46, 221, 162, 0.4);
+                }}
+                .or-divider {{
+                    display: flex;
+                    align-items: center;
+                    margin: 32px 0;
+                    color: #94a3b8;
+                    font-size: 14px;
+                    font-weight: 500;
+                }}
+                .or-divider::before,
+                .or-divider::after {{
+                    content: '';
+                    flex: 1;
+                    height: 1px;
+                    background: #e2e8f0;
+                }}
+                .or-divider span {{
+                    padding: 0 16px;
+                }}
+                .code-container {{
+                    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+                    border: 2px solid #e2e8f0;
+                    padding: 32px 24px;
+                    border-radius: 20px;
+                    margin: 24px 0;
+                    position: relative;
+                    overflow: hidden;
+                }}
+                .code-container::before {{
+                    content: '';
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    height: 4px;
+                    background: linear-gradient(90deg, #2edda2, #22c55e, #16a34a);
+                }}
+                .code-label {{
+                    font-size: 13px; 
+                    color: #64748b; 
+                    margin-bottom: 16px; 
+                    font-weight: 600;
+                    text-transform: uppercase;
+                    letter-spacing: 1px;
+                }}
+                .code {{
+                    font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+                    font-size: 40px; 
+                    letter-spacing: 8px;
+                    font-weight: 800;
+                    color: #2edda2;
+                    text-shadow: 0 2px 4px rgba(46, 221, 162, 0.2);
+                    line-height: 1;
+                }}
+                .security-info {{
+                    font-size: 15px;
+                    color: #dc2626;
+                    background: linear-gradient(135deg, rgba(239, 68, 68, 0.1) 0%, rgba(220, 38, 38, 0.1) 100%);
+                    border: 1px solid rgba(239, 68, 68, 0.25);
+                    border-radius: 16px;
+                    padding: 20px 24px;
+                    margin-top: 32px;
+                    font-weight: 600;
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                }}
+                .security-info::before {{
+                    content: '⚠️';
+                    font-size: 18px;
+                }}
+                .help-section {{
+                    background: linear-gradient(135deg, rgba(59, 130, 246, 0.1) 0%, rgba(37, 99, 235, 0.1) 100%);
+                    border: 1px solid rgba(59, 130, 246, 0.2);
+                    border-radius: 16px;
+                    padding: 24px;
+                    margin-top: 32px;
+                }}
+                .help-title {{
+                    font-size: 16px;
+                    font-weight: 600;
+                    color: #1e40af;
+                    margin-bottom: 8px;
+                }}
+                .help-text {{
+                    font-size: 14px;
+                    color: #3730a3;
+                    line-height: 1.5;
+                }}
+                .footer {{
+                    font-size: 14px;
+                    color: #64748b;
+                    text-align: center;
+                    padding: 32px 40px;
+                    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+                    border-top: 1px solid #e2e8f0;
+                }}
+                .footer-note {{
+                    margin-bottom: 12px;
+                    font-weight: 500;
+                }}
+                .copyright {{
+                    font-size: 13px;
+                    color: #94a3b8;
+                    font-weight: 400;
+                }}
+                
+                @media (max-width: 600px) {{
+                    .container {{ 
+                        margin: 10px; 
+                        max-width: calc(100vw - 20px);
+                    }}
+                    .header {{ padding: 32px 24px 28px; }}
+                    .content {{ padding: 36px 24px; }}
+                    .footer {{ padding: 24px; }}
+                    .title {{ font-size: 28px; }}
+                    .content-title {{ font-size: 22px; }}
+                    .content-text {{ font-size: 16px; }}
+                    .code {{ font-size: 32px; letter-spacing: 6px; }}
+                    .code-container {{ padding: 24px 20px; }}
+                    .reset-button {{ padding: 16px 32px; font-size: 15px; }}
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <div class="brand-container">
+                        <div class="title">RefineGo</div>
+                        <div class="tagline">Excellence in Digital Solutions</div>
+                    </div>
+                </div>
+                <div class="content">
+                    <h2 class="content-title">Password Reset Request</h2>
+                    <p class="content-text">
+                        We received a request to reset your RefineGo account password, Please use the otp code to proceed with your password reset.
+                    </p>
+                    
+                    <div class="or-divider">
+                        <span>Or use verification code</span>
+                    </div>
+                    
+                    <div class="code-container">
+                        <div class="code-label">Password Reset Code</div>
+                        <div class="code">{otp}</div>
+                    </div>
+
+                    <div class="security-info">
+                        This reset request expires in 15 minutes for security
+                    </div>
+                    
+                    <div class="help-section">
+                        <div class="help-title">Need Help?</div>
+                        <div class="help-text">
+                            If you're having trouble resetting your password or didn't request this change, 
+                            please contact our support team immediately for assistance.
+                        </div>
+                    </div>
+                </div>
+                <div class="footer">
+                    <div class="footer-note">
+                        If you didn't request a password reset, please ignore this email and your password will remain unchanged.
+                    </div>
+                    <div class="copyright">
+                        © 2024 RefineGo Technologies. All rights reserved.
+                    </div>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+    
+    text_content = f'''
+        Welcome to RefineGo!
+
+        Your verification code is: {otp}
+
+        This code will expire in 10 minutes.
+
+        If you didn’t create an account, you can safely ignore this email.
+    '''
+
+    msg = EmailMultiAlternatives(
+        subject,
+        text_content,
+        'RefineGo <noreply@refinego.com>',
+        [email]
+    )
+    msg.attach_alternative(html_content, "text/html")
+    msg.send(fail_silently=False)
+
+def send_verification_email(email, otp):
+    subject = 'RefineGo - Your Verification Code'
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>RefineGo - Email Verification</title>
+        <style>
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                margin: 0; 
+                padding: 0; 
+                background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }}
+            .container {{
+                max-width: 480px; 
+                margin: 20px; 
+                background-color: #ffffff;
+                border-radius: 24px; 
+                overflow: hidden;
+                box-shadow: 0 10px 40px rgba(0, 0, 0, 0.12), 0 4px 16px rgba(0, 0, 0, 0.08);
+                border: 1px solid rgba(0, 0, 0, 0.05);
+            }}
+            .header {{
+                background: linear-gradient(135deg, #2edda2 0%, #22c55e 50%, #16a34a 100%);
+                padding: 40px 30px 36px; 
+                text-align: center; 
+                color: #ffffff;
+                position: relative;
+                overflow: hidden;
+            }}
+            .header::before {{
+                content: '';
+                position: absolute;
+                top: -50%;
+                left: -50%;
+                width: 200%;
+                height: 200%;
+                background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+                animation: shimmer 4s ease-in-out infinite;
+            }}
+            @keyframes shimmer {{
+                0%, 100% {{ opacity: 0; transform: rotate(0deg); }}
+                50% {{ opacity: 1; transform: rotate(180deg); }}
+            }}
+            .icon {{
+                width: 64px; 
+                height: 64px;
+                margin: 0 auto 20px;
+                background: rgba(255, 255, 255, 0.2);
+                border: 2px solid rgba(255, 255, 255, 0.3);
+                border-radius: 20px;
+                display: flex; 
+                align-items: center; 
+                justify-content: center;
+                font-size: 28px;
+                backdrop-filter: blur(10px);
+                position: relative;
+                z-index: 2;
+            }}
+            .brand-container {{
+                position: relative;
+                z-index: 2;
+            }}
+            .title {{
+                font-size: 32px; 
+                font-weight: 800; 
+                margin: 0 0 8px;
+                letter-spacing: -0.5px;
+                text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            }}
+            .tagline {{
+                font-size: 14px; 
+                opacity: 0.9;
+                font-weight: 500;
+                letter-spacing: 0.5px;
+                text-transform: uppercase;
+            }}
+            .content {{
+                padding: 48px 36px; 
+                text-align: center;
+            }}
+            .content-title {{
+                font-size: 26px; 
+                font-weight: 700; 
+                margin-bottom: 16px;
+                color: #0f172a;
+                letter-spacing: -0.3px;
+            }}
+            .content-text {{
+                font-size: 17px; 
+                color: #64748b; 
+                margin-bottom: 36px;
+                line-height: 1.6;
+            }}
+            .code-container {{
+                background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+                border: 2px solid #e2e8f0;
+                padding: 36px 24px;
+                border-radius: 20px;
+                margin: 32px 0;
+                position: relative;
+                overflow: hidden;
+            }}
+            .code-container::before {{
+                content: '';
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                height: 4px;
+                background: linear-gradient(90deg, #2edda2, #22c55e, #16a34a);
+            }}
+            .code-label {{
+                font-size: 13px; 
+                color: #64748b; 
+                margin-bottom: 16px; 
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+            }}
+            .code {{
+                font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace;
+                font-size: 44px; 
+                letter-spacing: 10px;
+                font-weight: 800;
+                color: #2edda2;
+                text-shadow: 0 2px 4px rgba(46, 221, 162, 0.2);
+                line-height: 1;
+            }}
+            .security-info {{
+                font-size: 15px;
+                color: #059669;
+                background: linear-gradient(135deg, rgba(46, 221, 162, 0.1) 0%, rgba(34, 197, 94, 0.1) 100%);
+                border: 1px solid rgba(46, 221, 162, 0.25);
+                border-radius: 16px;
+                padding: 20px 24px;
+                margin-top: 32px;
+                font-weight: 600;
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }}
+            .security-info::before {{
+                content: '⏱️';
+                font-size: 18px;
+            }}
+            .footer {{
+                font-size: 14px;
+                color: #64748b;
+                text-align: center;
+                padding: 32px 36px;
+                background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+                border-top: 1px solid #e2e8f0;
+            }}
+            .footer-note {{
+                margin-bottom: 12px;
+                font-weight: 500;
+            }}
+            .copyright {{
+                font-size: 13px;
+                color: #94a3b8;
+                font-weight: 400;
+            }}
+            
+            @media (max-width: 600px) {{
+                .container {{ 
+                    margin: 10px; 
+                    max-width: calc(100vw - 20px);
+                }}
+                .header {{ padding: 32px 24px 28px; }}
+                .content {{ padding: 36px 24px; }}
+                .footer {{ padding: 24px; }}
+                .title {{ font-size: 28px; }}
+                .content-title {{ font-size: 22px; }}
+                .content-text {{ font-size: 16px; }}
+                .code {{ font-size: 36px; letter-spacing: 6px; }}
+                .code-container {{ padding: 28px 20px; }}
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <div class="brand-container">
+                    <div class="title">RefineGo</div>
+                    <div class="tagline">Excellence in Digital Solutions</div>
+                </div>
+            </div>
+            <div class="content">
+                <h2 class="content-title">Email Verification Required</h2>
+                <p class="content-text">Welcome to RefineGo! Please verify your email address using the secure code below to complete your account setup.</p>
+                
+                <div class="code-container">
+                    <div class="code-label">Verification Code</div>
+                    <div class="code">{otp}</div>
+                </div>
+
+                <div class="security-info">
+                    This verification code expires in 10 minutes for security
+                </div>
+            </div>
+            <div class="footer">
+                <div class="footer-note">
+                    Didn't create an account? You can safely ignore this email.
+                </div>
+                <div class="copyright">
+                    © 2024 RefineGo Technologies. All rights reserved.
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    text_content = f'''
+        Welcome to RefineGo!
+
+        Your verification code is: {otp}
+
+        This code will expire in 10 minutes.
+
+        If you didn’t create an account, you can safely ignore this email.
+    '''
+
+    msg = EmailMultiAlternatives(
+        subject,
+        text_content,
+        'RefineGo <noreply@refinego.com>',
+        [email]
+    )
+    msg.attach_alternative(html_content, "text/html")
+    msg.send(fail_silently=False)
+
+
 @api_view(['POST'])
+@permission_classes([AllowAny])
 def register_user(request):
-    data = request.data
-    email = data.get('email')  
-    username = data.get('username')
-
-    if not email or not username or not data.get('password'):
-        return Response({"error": "Missing required fields"}, status=400)
-
-    if User.objects.filter(username=username).exists():
-        return Response({"error": "Username already exists"}, status=400)
-
-    if User.objects.filter(email=email).exists():
-        return Response({"error": "Email already registered"}, status=400)
-
-    # Create user with is_active=False
-    user = User.objects.create_user(
-        username=username,
-        email=email,
-        password=data['password'],
-        phone_number=data.get('phone_number'),
-        preferred_fuel_type=data.get('preferred_fuel_type', ''),
-        is_active=False  # not active until OTP is verified
-    )
-
-    # Generate and send OTP
-    otp = str(random.randint(100000, 999999))
-    EmailOTP.objects.update_or_create(email=email, defaults={'otp': otp})
-
-    send_mail(
-        subject='Your Verification OTP',
-        message=f'Your code is: {otp}',
-        from_email='noreply@yourapp.com',
-        recipient_list=[email],
-        fail_silently=False,
-    )
-
-    return Response({"message": "Account created. Verify OTP sent to email."}, status=201)
+    """Register a new user with OTP verification"""
+    try:
+        data = request.data
+        email = data.get('email')
+        username = data.get('username')
+        password = data.get('password')
+        phone_number = data.get('phone_number')
+        
+        # Validate required fields
+        if not email or not username or not password:
+            return Response({
+                "success": False,
+                "error": "Missing required fields"
+            }, status=400)
+        
+        # Check if username already exists
+        if User.objects.filter(username=username).exists():
+            return Response({
+                "success": False,
+                "error": "Username already exists"
+            }, status=400)
+        
+        # Check if email already exists
+        if User.objects.filter(email=email).exists():
+            return Response({
+                "success": False,
+                "error": "Email already registered"
+            }, status=400)
+        
+        # Validate phone number length
+        if phone_number and len(phone_number) < 10:
+            return Response({
+                "success": False,
+                "error": "Phone number must be at least 10 digits"
+            }, status=400)
+        
+        # Create user with is_active=False
+        user = User.objects.create_user(
+            username=username,
+            email=email,
+            password=password,
+            is_active=False
+        )
+        
+        # Add phone number if your User model supports it
+        if phone_number:
+            user.phone_number = phone_number
+            user.save()
+        
+        # Generate and send OTP
+        otp = str(random.randint(100000, 999999))
+        EmailOTP.objects.update_or_create(
+            email=email, 
+            defaults={'otp': otp}
+        )
+        
+        # Send OTP email with modern template
+        try:
+            send_verification_email(email, otp)
+        except Exception as e:
+            user.delete()
+            return Response({
+                "success": False,
+                "error": "Failed to send verification email. Please try again."
+            }, status=500)
+        
+        return Response({
+            "success": True,
+            "message": "Account created successfully. Please check your email for the verification code.",
+            "email": email
+        }, status=201)
+        
+    except Exception as e:
+        return Response({
+            "success": False,
+            "error": "Registration failed. Please try again."
+        }, status=500)
 
 @api_view(['POST'])
+@permission_classes([AllowAny])  # Add this line
 def verify_otp(request):
-    email = request.data.get('email')
-    otp = request.data.get('otp')
-
+    """Verify OTP and activate user account"""
     try:
-        otp_record = EmailOTP.objects.get(email=email)
+        email = request.data.get('email')
+        otp = request.data.get('otp')
+        
+        if not email or not otp:
+            return Response({
+                "success": False,
+                "error": "Email and OTP are required"
+            }, status=400)
+        
+        # Get OTP record
+        try:
+            otp_record = EmailOTP.objects.get(email=email)
+        except EmailOTP.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "No verification code found for this email"
+            }, status=400)
+        
+        # Check if OTP matches
         if otp_record.otp != otp:
-            return Response({"error": "Invalid OTP"}, status=400)
+            return Response({
+                "success": False,
+                "error": "Invalid verification code"
+            }, status=400)
+        
+        # Check if OTP is expired (10 minutes)
         if otp_record.created_at + timedelta(minutes=10) < timezone.now():
-            return Response({"error": "OTP expired"}, status=400)
-
-        # Activate the user
-        user = User.objects.get(email=email)
+            otp_record.delete()  # Clean up expired OTP
+            return Response({
+                "success": False,
+                "error": "Verification code has expired. Please register again."
+            }, status=400)
+        
+        # Get and activate the user
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "User account not found"
+            }, status=400)
+        
+        # Activate user
         user.is_active = True
         user.save()
+        
+        # Clean up OTP record
+        otp_record.delete()
+        
+        # Log the user in and create session
+        login(request, user)
+        
+        return Response({
+            "success": True,
+            "message": "Email verified successfully! Your account is now active.",
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "phone_number": getattr(user, 'phone_number', None)
+            }
+        }, status=200)
+        
+    except Exception as e:
+        return Response({
+            "success": False,
+            "error": "Verification failed. Please try again."
+        }, status=500)
 
-        otp_record.delete()  # remove OTP after successful use
-        return Response({"message": "OTP verified. Account activated."}, status=200)
-
-    except EmailOTP.DoesNotExist:
-        return Response({"error": "No OTP found for email"}, status=400)
-    except User.DoesNotExist:
-        return Response({"error": "User not found"}, status=400)
+@api_view(['POST'])
+@permission_classes([AllowAny])  # Add this line
+@csrf_exempt  # Add this line
+def resend_otp(request):
+    """Resend OTP to user's email"""
+    try:
+        email = request.data.get('email')
+        
+        if not email:
+            return Response({
+                "success": False,
+                "error": "Email is required"
+            }, status=400)
+        
+        # Check if user exists and is not active
+        try:
+            user = User.objects.get(email=email, is_active=False)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "No pending verification found for this email"
+            }, status=400)
+        
+        # Generate new OTP
+        otp = str(random.randint(100000, 999999))
+        EmailOTP.objects.update_or_create(
+            email=email, 
+            defaults={'otp': otp}
+        )
+        
+        # Send OTP email
+        try:
+            send_verification_email(email, otp)
+        except Exception as e:
+            return Response({
+                "success": False,
+                "error": "Failed to send verification email"
+            }, status=500)
+        
+        return Response({
+            "success": True,
+            "message": "New verification code sent to your email"
+        }, status=200)
+        
+    except Exception as e:
+        return Response({
+            "success": False,
+            "error": "Failed to resend verification code"
+        }, status=500)
     
 @api_view(['POST'])
-def login_verify_otp(request):
-    email = request.data.get('email')
-    otp = request.data.get('otp')
-
-    if not email or not otp:
-        return Response({"error": "Email and OTP are required."}, status=status.HTTP_400_BAD_REQUEST)
-
+@permission_classes([AllowAny])  # Add this line
+def login_user(request):
+    """
+    Step 1: Authenticate user credentials and send OTP
+    """
     try:
-        otp_record = EmailOTP.objects.get(email=email)
-    except EmailOTP.DoesNotExist:
-        return Response({"error": "OTP not found. Please request a new one."}, status=status.HTTP_404_NOT_FOUND)
+        data = request.data
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '')
 
-    if otp_record.otp != otp:
-        return Response({"error": "Invalid OTP."}, status=status.HTTP_400_BAD_REQUEST)
-
-    # Optionally, delete or invalidate the OTP after successful verification
-    otp_record.delete()
-
-    # You can return user info or token here if you have token authentication
-    user = User.objects.get(email=email)
-    return Response({"message": "OTP verified successfully.", "username": user.username})
+        # Validate required fields
+        if not email or not password:
+            return Response({
+                "success": False,
+                "error": "Email and password are required"
+            }, status=400)
+        
+        try:
+            user = User.objects.get(email__iexact=email)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Invalid email or password from start"
+            }, status=401)
+        
+        # Check if user account is active
+        if not user.is_active:
+            return Response({
+                "success": False,
+                "error": "Account is not activated. Please verify your email first."
+            }, status=401)
+        
+        # Authenticate user
+        # Note: authenticate() expects username, but we'll use email
+        # You might need to create a custom authentication backend or use email as username
+        user_auth = authenticate(request, username=user.username, password=password)
+        
+        if not user_auth:
+            return Response({
+                "success": False,
+                "error": "Invalid email or password"
+            }, status=401)
+        
+        # Generate and send OTP for login verification
+        otp = str(random.randint(100000, 999999))
+        EmailOTP.objects.update_or_create(
+            email=email, 
+            defaults={'otp': otp}
+        )
+        
+        # Send OTP email
+        try:
+            send_login_verification_email(email, otp)
+            
+            logger.info(f"Login OTP sent to {email}")
+            
+        except Exception as e:
+            logger.error(f"Failed to send login OTP to {email}: {str(e)}")
+            return Response({
+                "success": False,
+                "error": "Failed to send verification code. Please try again."
+            }, status=500)
+        
+        return Response({
+            "success": True,
+            "message": "Verification code sent to your email. Please check your inbox.",
+            "email": email,
+            "step": "otp_verification"
+        }, status=200)
+        
+    except Exception as e:
+        logger.error(f"Login error: {str(e)}")
+        return Response({
+            "success": False,
+            "error": "Login failed. Please try again."
+        }, status=500)
 
 
 @api_view(['POST'])
-def login_user(request):
-    data = request.data
-    email = data.get('email')
-    password = data.get('password')
+@permission_classes([AllowAny])  # Add this line
+def verify_login_otp(request):
+    """
+    Step 2: Verify OTP and complete login
+    """
+    try:
+        email = request.data.get('email', '').strip().lower()
+        otp = request.data.get('otp', '').strip()
+        
+        if not email or not otp:
+            return Response({
+                "success": False,
+                "error": "Email and verification code are required"
+            }, status=400)
+        
+        # Get OTP record
+        try:
+            otp_record = EmailOTP.objects.get(email__iexact=email)
 
-    if not email or not password:
-        return Response({"error": "Email and password required"}, status=status.HTTP_400_BAD_REQUEST)
+        except EmailOTP.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "No verification code found. Please try logging in again."
+            }, status=400)
+        
+        # Check if OTP matches
+        if otp_record.otp != otp:
+            return Response({
+                "success": False,
+                "error": "Invalid verification code"
+            }, status=400)
+        
+        # Check if OTP is expired (10 minutes)
+        if otp_record.created_at + timedelta(minutes=10) < timezone.now():
+            otp_record.delete()  # Clean up expired OTP
+            return Response({
+                "success": False,
+                "error": "Verification code has expired. Please try logging in again."
+            }, status=400)
+        
+        # Get the user
+        try:
+            user = User.objects.get(email__iexact=email)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "User account not found"
+            }, status=400)
+        
+        # Double-check user is active
+        if not user.is_active:
+            return Response({
+                "success": False,
+                "error": "Account is not activated"
+            }, status=401)
+        
+        # Log the user in
+        login(request, user)
+        
+        # Clean up OTP record
+        otp_record.delete()
+        
+        # Update last login
+        user.last_login = timezone.now()
+        user.save(update_fields=['last_login'])
+        
+        logger.info(f"User {user.email} logged in successfully")
+        
+        return Response({
+            "success": True,
+            "message": "Login successful! Welcome back.",
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "phone_number": getattr(user, 'phone_number', None),
+                "last_login": user.last_login.isoformat() if user.last_login else None
+            }
+        }, status=200)
+        
+    except Exception as e:
+        logger.error(f"OTP verification error: {str(e)}")
+        return Response({
+            "success": False,
+            "error": "Verification failed. Please try again."
+        }, status=500)
+    
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def verify_reset_otp(request):
+    """Verify password reset OTP - Debug Version"""
+    print("=" * 50)
+    print("VERIFY_RESET_OTP DEBUG START")
+    print("=" * 50)
+    
+    try:
+        # Debug: Print raw request data
+        print(f"Raw request.data: {request.data}")
+        print(f"Request method: {request.method}")
+        print(f"Request headers: {dict(request.headers)}")
+        
+        # Extract and clean data
+        email = request.data.get('email', '').strip().lower()
+        otp = request.data.get('otp', '').strip()
+        
+        print(f"Extracted email: '{email}'")
+        print(f"Extracted OTP: '{otp}'")
+        print(f"Email type: {type(email)}")
+        print(f"OTP type: {type(otp)}")
+        print(f"Email length: {len(email)}")
+        print(f"OTP length: {len(otp)}")
 
-    user = authenticate(request, username=email, password=password)
-    if user is None:
-        return Response({"error": "Invalid email or password"}, status=status.HTTP_401_UNAUTHORIZED)
+        # Validation
+        if not email or not otp:
+            print("ERROR: Email or OTP is empty")
+            print(f"Email empty: {not email}")
+            print(f"OTP empty: {not otp}")
+            return Response({
+                "success": False,
+                "error": "Email and OTP are required"
+            }, status=400)
 
-    # Generate OTP and save/update in EmailOTP table
-    otp = str(random.randint(100000, 999999))
-    EmailOTP.objects.update_or_create(email=email, defaults={'otp': otp})
+        print("✓ Basic validation passed")
 
-    # Send OTP email
-    send_mail(
-        'Your login OTP',
-        f'Your OTP is {otp}',
-        settings.DEFAULT_FROM_EMAIL,
-        [email],
-        fail_silently=False,
-    )
-    return Response({"message": "OTP sent to your email. Please verify to login."})
+        # Check all OTP records for debugging
+        all_otps = EmailOTP.objects.all()
+        print(f"Total OTP records in database: {all_otps.count()}")
+        
+        for otp_record in all_otps:
+            print(f"  - Email: '{otp_record.email}', OTP: '{otp_record.otp}', Created: {otp_record.created_at}")
+
+        # Get OTP record
+        try:
+            otp_record = EmailOTP.objects.get(email__iexact=email)
+            print(f"✓ Found OTP record for email: {email}")
+            print(f"  - Stored email: '{otp_record.email}'")
+            print(f"  - Stored OTP: '{otp_record.otp}'")
+            print(f"  - Created at: {otp_record.created_at}")
+            print(f"  - Current time: {timezone.now()}")
+            
+            # Check exact match
+            print(f"Email match: '{email}' == '{otp_record.email}' -> {email == otp_record.email}")
+            print(f"OTP match: '{otp}' == '{otp_record.otp}' -> {otp == otp_record.otp}")
+            
+        except EmailOTP.DoesNotExist:
+            print(f"ERROR: No OTP record found for email: {email}")
+            print("Available emails in OTP table:")
+            for otp_rec in EmailOTP.objects.all():
+                print(f"  - '{otp_rec.email}'")
+            return Response({
+                "success": False,
+                "error": "No verification code found for this email"
+            }, status=400)
+
+        # Check if OTP matches
+        if otp_record.otp != otp:
+            print(f"ERROR: OTP mismatch")
+            print(f"  - Expected: '{otp_record.otp}' (length: {len(otp_record.otp)})")
+            print(f"  - Received: '{otp}' (length: {len(otp)})")
+            print(f"  - Expected type: {type(otp_record.otp)}")
+            print(f"  - Received type: {type(otp)}")
+            
+            # Character by character comparison
+            for i, (expected_char, received_char) in enumerate(zip(otp_record.otp, otp)):
+                match = expected_char == received_char
+                print(f"    Position {i}: '{expected_char}' vs '{received_char}' -> {match}")
+            
+            return Response({
+                "success": False,
+                "error": "Invalid verification code"
+            }, status=400)
+
+        print("✓ OTP matches")
+
+        # Check expiration
+        expiry_time = otp_record.created_at + timedelta(minutes=10)
+        current_time = timezone.now()
+        
+        print(f"OTP created at: {otp_record.created_at}")
+        print(f"Current time: {current_time}")
+        print(f"Expiry time: {expiry_time}")
+        print(f"Time difference: {current_time - otp_record.created_at}")
+        print(f"Is expired: {expiry_time < current_time}")
+        
+        if expiry_time < current_time:
+            print("ERROR: OTP has expired")
+            otp_record.delete()
+            print("✓ Expired OTP record deleted")
+            return Response({
+                "success": False,
+                "error": "Verification code has expired. Please request again."
+            }, status=400)
+
+        print("✓ OTP is not expired")
+
+        # Get the user
+        try:
+            user = User.objects.get(email__iexact=email)
+            print(f"✓ Found user: {user.email} (ID: {user.id})")
+            print(f"  - User active: {user.is_active}")
+            print(f"  - User staff: {user.is_staff}")
+            print(f"  - User superuser: {user.is_superuser}")
+        except User.DoesNotExist:
+            print(f"ERROR: No user found with email: {email}")
+            print("Available users:")
+            for u in User.objects.all():
+                print(f"  - {u.email} (ID: {u.id})")
+            return Response({
+                "success": False,
+                "error": "User account not found"
+            }, status=400)
+
+        # Generate reset token (you might want to use a proper token generation)
+        import secrets
+        reset_token = secrets.token_urlsafe(32)
+        print(f"Generated reset token: {reset_token}")
+
+        # Clean up OTP record
+        otp_record.delete()
+        print("✓ OTP record deleted after successful verification")
+
+        # Prepare response
+        response_data = {
+            "success": True,
+            "message": "OTP verified successfully. You can now reset your password.",
+            "user_id": user.id,
+            "reset_token": reset_token
+        }
+        
+        print("✓ Preparing success response:")
+        print(f"  Response data: {response_data}")
+
+        print("=" * 50)
+        print("VERIFY_RESET_OTP DEBUG END - SUCCESS")
+        print("=" * 50)
+
+        return Response(response_data, status=200)
+
+    except Exception as e:
+        print("=" * 50)
+        print("VERIFY_RESET_OTP DEBUG - EXCEPTION OCCURRED")
+        print("=" * 50)
+        print(f"Exception type: {type(e).__name__}")
+        print(f"Exception message: {str(e)}")
+        print(f"Exception args: {e.args}")
+        
+        import traceback
+        print("Full traceback:")
+        print(traceback.format_exc())
+        
+        print("=" * 50)
+        print("VERIFY_RESET_OTP DEBUG END - ERROR")
+        print("=" * 50)
+        
+        return Response({
+            "success": False,
+            "error": "OTP verification failed. Please try again."
+        }, status=500)
+    
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def reset_password(request):
+    """
+    Reset user password using verified email
+    """
+    try:
+        email = request.data.get('email', '').strip().lower()
+        new_password = request.data.get('password', '')
+
+        if not email or not new_password:
+            return Response({
+                "success": False,
+                "error": "Email and new password are required."
+            }, status=400)
+
+        try:
+            user = get_user_model().objects.get(email__iexact=email, is_active=True)
+        except get_user_model().DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "User not found."
+            }, status=404)
+
+        user.password = make_password(new_password)
+        user.save()
+
+        # Optional: Invalidate OTP
+        EmailOTP.objects.filter(email__iexact=email).delete()
+
+        return Response({
+            "success": True,
+            "message": "Password reset successful."
+        })
+
+    except Exception as e:
+        return Response({
+            "success": False,
+            "error": "Failed to reset password."
+        }, status=500)
+
+@api_view(['POST'])
+@permission_classes([AllowAny])  # Add this line
+def resend_login_otp(request):
+    """
+    Resend OTP for login verification
+    """
+    try:
+        email = request.data.get('email', '').strip().lower()
+        
+        if not email:
+            return Response({
+                "success": False,
+                "error": "Email is required"
+            }, status=400)
+        
+        # Check if user exists and is active
+        try:
+            user = User.objects.get(email__iexact=email, is_active=True)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "User not found or account not activated"
+            }, status=400)
+        
+        # Check if there's a recent OTP request (rate limiting)
+        recent_otp = EmailOTP.objects.filter(
+            email__iexact=email,
+            created_at__gte=timezone.now() - timedelta(minutes=1)
+        ).first()
+        
+        if recent_otp:
+            return Response({
+                "success": False,
+                "error": "Please wait before requesting another code"
+            }, status=429)
+        
+        # Generate new OTP
+        otp = str(random.randint(100000, 999999))
+        EmailOTP.objects.update_or_create(
+            email__iexact=email, 
+            defaults={'otp': otp}
+        )
+        
+        # Send OTP email
+        try:
+            send_login_verification_email(email, otp)
+            
+            logger.info(f"Login OTP resent to {email}")
+            
+        except Exception as e:
+            logger.error(f"Failed to resend login OTP to {email}: {str(e)}")
+            return Response({
+                "success": False,
+                "error": "Failed to send verification code. Please try again."
+            }, status=500)
+        
+        return Response({
+            "success": True,
+            "message": "New verification code sent to your email"
+        }, status=200)
+        
+    except Exception as e:
+        logger.error(f"Resend OTP error: {str(e)}")
+        return Response({
+            "success": False,
+            "error": "Failed to resend code. Please try again."
+        }, status=500)
+
+
+@api_view(['POST'])
+def logout_user(request):
+    """
+    Logout user and clear session
+    """
+    try:
+        if request.user.is_authenticated:
+            user_email = request.user.email
+            logout(request)
+            logger.info(f"User {user_email} logged out")
+            
+            return Response({
+                "success": True,
+                "message": "Logged out successfully"
+            }, status=200)
+        else:
+            return Response({
+                "success": False,
+                "error": "No active session found"
+            }, status=400)
+            
+    except Exception as e:
+        logger.error(f"Logout error: {str(e)}")
+        return Response({
+            "success": False,
+            "error": "Logout failed"
+        }, status=500)
+
+@api_view(['GET'])
+def check_auth_status(request):
+    """
+    Check if user is authenticated
+    """
+    try:
+        if request.user.is_authenticated:
+            return Response({
+                "success": True,
+                "authenticated": True,
+                "user": {
+                    "id": request.user.id,
+                    "username": request.user.username,
+                    "email": request.user.email,
+                    "phone_number": getattr(request.user, 'phone_number', None)
+                }
+            }, status=200)
+        else:
+            return Response({
+                "success": True,
+                "authenticated": False
+            }, status=200)
+
+    except Exception as e:
+        logger.error(f"Auth status check error: {str(e)}")
+        return Response({
+            "success": False,
+            "error": "Failed to check authentication status"
+        }, status=500)
+
+
+# Additional helper view for password reset (optional)
+@api_view(['POST'])
+@permission_classes([AllowAny])  # Allow anyone to access this endpoint
+def user_forgot_password(request):
+    """
+    Send password reset OTP
+    """
+    try:
+        email = request.data.get('email', '').strip().lower()
+        
+        if not email:
+            return Response({
+                "success": False,
+                "error": "Email is required"
+            }, status=400)
+        
+        # Check if user exists
+        try:
+            user = User.objects.get(email__iexact=email, is_active=True)
+        except User.DoesNotExist:
+            # Don't reveal if email exists or not for security
+            return Response({
+                "success": True,
+                "message": "If this email is registered, you will receive a password reset code."
+            }, status=200)
+        
+        # Generate reset OTP
+        otp = str(random.randint(100000, 999999))
+        EmailOTP.objects.update_or_create(
+            email=email, 
+            defaults={'otp': otp}
+        )
+
+        print(f"Generated OTP for {email}: {otp}")  # Debugging line
+        
+        # Send password reset email
+        try:
+            send_forgotpass_email(email, otp)
+            
+            logger.info(f"Password reset OTP sent to {email}")
+            
+        except Exception as e:
+            logger.error(f"Failed to send password reset OTP to {email}: {str(e)}")
+        
+        return Response({
+            "success": True,
+            "message": "If this email is registered, you will receive a password reset code."
+        }, status=200)
+        
+    except Exception as e:
+        logger.error(f"Forgot password error: {str(e)}")
+        return Response({
+            "success": False,
+            "error": "Request failed. Please try again."
+        }, status=500)
 
 
 #DASHBOARD MAIN FUNCTIONS
@@ -211,7 +1686,6 @@ class FuelCompanyViewSet(viewsets.ReadOnlyModelViewSet):
     search_fields = ['name']
 
 class PetrolStationViewSet(viewsets.ModelViewSet):
-    queryset = PetrolStation.objects.filter(is_active=True)
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     serializer_class = PetrolStationListSerializer
@@ -226,7 +1700,7 @@ class PetrolStationViewSet(viewsets.ModelViewSet):
 
         self.cache_timeout = 3600  # 1 hour cache
         self.price_sources = [
-            'https://www.fuelprices.co.za/',
+            'https://www.petrol-price.co.za/',
             'https://www.aa.co.za/fuel-price',
             'https://www.automobil.co.za/fuel-prices/',
         ]
@@ -310,16 +1784,7 @@ class PetrolStationViewSet(viewsets.ModelViewSet):
                 if cached_result:
                     logger.info("Returning cached result")
                     return Response(cached_result)
-            
-            # Get stations from database first
-            logger.info("Starting database query...")
-            try:
-                db_stations = self._get_nearby_db_stations(lat, lng, radius)
-                logger.info("DB stations count: %d", len(db_stations))
-            except Exception as e:
-                logger.error(f"Error getting DB stations: {e}")
-                logger.error(traceback.format_exc())
-                db_stations = []
+
 
             # Get Google stations
             logger.info("Starting Google Places query...")
@@ -333,6 +1798,7 @@ class PetrolStationViewSet(viewsets.ModelViewSet):
 
             # Merge and process stations
             try:
+                db_stations = []  # TODO: Replace with actual DB station query if needed
                 all_stations = self._merge_station_data(db_stations, google_stations, lat, lng)
                 logger.info("Merged station count: %d", len(all_stations))
 
@@ -380,76 +1846,6 @@ class PetrolStationViewSet(viewsets.ModelViewSet):
                 {"error": "Internal server error"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-    
-    def _get_nearby_db_stations(self, lat: float, lng: float, radius: float) -> List[Dict]:
-        """Get nearby stations from database with proper null handling"""
-        try:
-            # Calculate latitude/longitude ranges with validation
-            if radius <= 0:
-                return []
-                
-            lat_range = radius * 0.009
-            lng_range = radius * 0.009
-            
-            # Validate coordinate ranges
-            if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
-                return []
-            
-            # Get stations with safe float conversion
-            stations = PetrolStation.objects.filter(
-                latitude__range=(lat - lat_range, lat + lat_range),
-                longitude__range=(lng - lng_range, lng + lng_range),
-                is_active=True
-            ).select_related('company')
-            
-            result = []
-            for station in stations:
-                try:
-                    # Safely convert coordinates to float
-                    station_lat = float(station.latitude) if station.latitude is not None else None
-                    station_lng = float(station.longitude) if station.longitude is not None else None
-                    
-                    # Skip if coordinates are invalid
-                    if station_lat is None or station_lng is None:
-                        continue
-                    
-                    distance = self._calculate_distance(lat, lng, station_lat, station_lng)
-                    
-                    # Skip if distance calculation failed or exceeds radius
-                    if distance is None or distance > radius:
-                        continue
-                    
-                    # Serialize station data with null checks
-                    station_data = PetrolStationListSerializer(station).data
-                    station_data['distance'] = round(distance, 2)
-                    station_data['source'] = 'database'
-                    
-                    # Add database-specific fields with null checks
-                    additional_data = {
-                        'has_atm': bool(station.has_atm) if station.has_atm is not None else None,
-                        'has_shop': bool(station.has_shop) if station.has_shop is not None else None,
-                        'has_coffee': bool(station.has_coffee) if station.has_coffee is not None else None,
-                        'has_ev_charging': bool(station.has_ev_charging) if station.has_ev_charging is not None else None,
-                        'busy_level': int(station.busy_level) if station.busy_level is not None else None,
-                        'wait_time': int(station.wait_time) if station.wait_time is not None else None,
-                        'is_24h': bool(station.is_24h) if station.is_24h is not None else None,
-                        'google_rating': float(station.google_rating) if station.google_rating is not None else None,
-                        'opening_hours': station.opening_hours if station.opening_hours else None,
-                    }
-                    
-                    station_data.update(additional_data)
-                    result.append(station_data)
-                    
-                except (TypeError, ValueError) as e:
-                    logger.warning(f"Skipping station {station.id} due to processing error: {str(e)}")
-                    continue
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error in _get_nearby_db_stations: {str(e)}")
-            logger.error(traceback.format_exc())
-            return []
         
     def _merge_station_data(self, db_stations: List[Dict], google_stations: List[Dict], lat: float, lng: float) -> List[Dict]:
         """Merge database stations with Google Places data, avoiding duplicates"""
@@ -1261,71 +2657,7 @@ class DashboardViewSet(viewsets.ViewSet):
             "unread_notifications": unread_notifications,
             "month_spending": month_spending
         })
-    
-class EnhancedPetrolStationSerializer(serializers.ModelSerializer):
-    current_prices = serializers.SerializerMethodField()
-    distance = serializers.FloatField(read_only=True)
-    reliability_score = serializers.FloatField(read_only=True)
-    price_trend = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = PetrolStation
-        fields = [
-            'id', 'name', 'company', 'address', 'city', 'state',
-            'latitude', 'longitude', 'phone_number', 'website',
-            'is_24h', 'has_atm', 'has_shop', 'has_coffee', 'has_ev_charging',
-            'google_rating', 'google_user_ratings_total', 'data_quality_score',
-            'current_prices', 'distance', 'reliability_score', 'price_trend'
-        ]
-    
-    def get_current_prices(self, obj):
-        """Get latest prices for each fuel type"""
-        latest_prices = []
-        
-        for fuel_type in FuelType.objects.all():
-            latest_price = FuelPrice.objects.filter(
-                station=obj,
-                fuel_type=fuel_type
-            ).order_by('-reported_at').first()
-            
-            if latest_price:
-                latest_prices.append({
-                    'fuel_type': fuel_type.name,
-                    'price': float(latest_price.price),
-                    'reported_at': latest_price.reported_at,
-                    'source': latest_price.source,
-                    'confidence_score': latest_price.confidence_score,
-                    'price_change': float(latest_price.price_change) if latest_price.price_change else None
-                })
-        
-        return latest_prices
-    
-    def get_price_trend(self, obj):
-        """Calculate price trend over the last week"""
-        week_ago = timezone.now() - timedelta(days=7)
-        
-        trends = {}
-        for fuel_type in FuelType.objects.all():
-            prices = FuelPrice.objects.filter(
-                station=obj,
-                fuel_type=fuel_type,
-                reported_at__gte=week_ago
-            ).order_by('reported_at')
-            
-            if prices.count() >= 2:
-                first_price = float(prices.first().price)
-                last_price = float(prices.last().price)
-                change = last_price - first_price
-                
-                if abs(change) > 0.01:  # Only report significant changes
-                    trends[fuel_type.name] = {
-                        'change': round(change, 3),
-                        'direction': 'up' if change > 0 else 'down',
-                        'percentage': round((change / first_price) * 100, 2)
-                    }
-        
-        return trends
-    
+ 
     #WEB SCRAPPING
 
     logger = logging.getLogger(__name__)
@@ -1402,7 +2734,7 @@ class FuelPriceEnhancer:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
-            response = requests.get('https://www.fuelprices.co.za/', headers=headers, timeout=10)
+            response = requests.get('https://www.petrol-price.co.za/', headers=headers, timeout=10)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -1469,43 +2801,84 @@ class FuelPriceEnhancer:
             return None
     
     def _scrape_automobil_co_za(self) -> Optional[Dict]:
-        """Scrape from automobil.co.za"""
+        """Scrape from riseupwv.org - working source with current SA fuel prices"""
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
-            response = requests.get('https://www.automobil.co.za/fuel-prices/', headers=headers, timeout=10)
+            response = requests.get('https://www.riseupwv.org/fuel-price-drop/', headers=headers, timeout=15)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
             prices = {}
             
-            # Look for price tables
+            # Look for the fuel price table - this site has a structured table with province data
             tables = soup.find_all('table')
             for table in tables:
                 rows = table.find_all('tr')
+                
+                # Find header row to identify columns
+                header_row = None
                 for row in rows:
-                    cells = row.find_all(['td', 'th'])
-                    if len(cells) >= 2:
-                        fuel_type = cells[0].get_text().strip().lower()
-                        price_text = cells[1].get_text().strip()
-                        
-                        price_match = re.search(r'R?(\d+\.?\d*)', price_text)
-                        if price_match:
-                            price = float(price_match.group(1))
-                            
-                            if 'petrol' in fuel_type or '93' in fuel_type:
-                                prices['regular'] = price
-                            elif '95' in fuel_type or 'premium' in fuel_type:
-                                prices['premium'] = price
-                            elif 'diesel' in fuel_type:
-                                prices['diesel'] = price
+                    if 'Petrol 93' in row.get_text() or 'Petrol 95' in row.get_text():
+                        header_row = row
+                        break
+                
+                if header_row:
+                    headers = [th.get_text().strip() for th in header_row.find_all(['th', 'td'])]
+                    
+                    # Find Gauteng row (most common reference point)
+                    for row in rows:
+                        cells = row.find_all(['td', 'th'])
+                        if len(cells) >= 4 and 'Gauteng' in cells[0].get_text():
+                            try:
+                                # Extract prices for Gauteng (index 0 = Province name)
+                                petrol_93_text = cells[1].get_text().strip()  # Petrol 93 column
+                                petrol_95_text = cells[2].get_text().strip()  # Petrol 95 column
+                                diesel_text = cells[3].get_text().strip()     # Diesel column
+                                
+                                # Extract numeric values
+                                petrol_93_match = re.search(r'R?(\d+\.?\d*)', petrol_93_text)
+                                petrol_95_match = re.search(r'R?(\d+\.?\d*)', petrol_95_text)
+                                diesel_match = re.search(r'R?(\d+\.?\d*)', diesel_text)
+                                
+                                if petrol_93_match:
+                                    prices['regular'] = float(petrol_93_match.group(1))
+                                if petrol_95_match:
+                                    prices['premium'] = float(petrol_95_match.group(1))
+                                if diesel_match:
+                                    prices['diesel'] = float(diesel_match.group(1))
+                                
+                                break
+                            except (IndexError, ValueError) as e:
+                                logger.warning(f"Error parsing Gauteng row: {e}")
+                                continue
+            
+            # Fallback: Look for any price mentions in the text
+            if not prices:
+                text_content = soup.get_text()
+                
+                # Look for price patterns in text
+                petrol_93_pattern = r'Petrol 93.*?R(\d+\.?\d*)'
+                petrol_95_pattern = r'Petrol 95.*?R(\d+\.?\d*)'
+                diesel_pattern = r'Diesel.*?R(\d+\.?\d*)'
+                
+                petrol_93_match = re.search(petrol_93_pattern, text_content, re.IGNORECASE)
+                petrol_95_match = re.search(petrol_95_pattern, text_content, re.IGNORECASE)
+                diesel_match = re.search(diesel_pattern, text_content, re.IGNORECASE)
+                
+                if petrol_93_match:
+                    prices['regular'] = float(petrol_93_match.group(1))
+                if petrol_95_match:
+                    prices['premium'] = float(petrol_95_match.group(1))
+                if diesel_match:
+                    prices['diesel'] = float(diesel_match.group(1))
             
             return self._format_prices(prices) if prices else None
             
         except Exception as e:
-            logger.error(f"Error scraping automobil.co.za: {str(e)}")
+            logger.error(f"Error scraping riseupwv.org: {str(e)}")
             return None
     
     def _format_prices(self, raw_prices: Dict) -> Dict:
@@ -1918,3 +3291,526 @@ class PetrolStationEnhancedMethods:
             'diesel_price': 22.80
         })
         return station_data
+    
+@api_view(['GET'])
+def user_notifications(request):
+    notifications = Notification.objects.filter(notification_type='PRICE_ALERT')[:5]
+    serializer = NotificationSerializer(notifications, many=True)
+    return Response(serializer.data)
+
+
+#TRIP RELATED FUNCTIONALITIES
+
+class TripViewSet(viewsets.ModelViewSet):
+    serializer_class = TripSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Trip.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @action(detail=False, methods=['post'])
+    def create_and_start_trip(self, request):
+        """Create and start a trip directly without a trip plan"""
+        required_fields = ['destination_address', 'destination_latitude', 
+                        'destination_longitude', 'planned_distance', 'planned_duration']
+        
+        # Check for required fields (removed 'vehicle' from required)
+        missing_fields = [field for field in required_fields if not request.data.get(field)]
+        if missing_fields:
+            return Response(
+                {'error': f'Missing required fields: {", ".join(missing_fields)}'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            # Get vehicle if provided, otherwise None
+            vehicle_id = request.data.get('vehicle')
+            
+            # Create trip directly
+            trip_data = {
+                'user': request.user,
+                'vehicle_id': vehicle_id,  # This can be None now
+                'start_address': request.data.get('start_address', ''),
+                'start_latitude': request.data.get('start_latitude'),
+                'start_longitude': request.data.get('start_longitude'),
+                'destination_address': request.data.get('destination_address'),
+                'destination_latitude': request.data.get('destination_latitude'),
+                'destination_longitude': request.data.get('destination_longitude'),
+                'planned_distance': request.data.get('planned_distance'),
+                'planned_duration': request.data.get('planned_duration'),
+                'status': 'active',
+                'started_at': timezone.now()
+            }
+            
+            trip = Trip.objects.create(**trip_data)
+            serializer = self.get_serializer(trip)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=True, methods=['post'])  # Note: These need to be indented as part of the class
+    def complete_trip(self, request, pk=None):
+        """Complete an active trip and award points"""
+        trip = self.get_object()
+
+        if trip.status != 'active':
+            return Response({'error': 'Trip is not active'}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            trip.status = 'completed'
+            trip.completed_at = timezone.now()
+            trip.actual_distance = request.data.get('actual_distance', trip.planned_distance)
+            trip.actual_duration = request.data.get('actual_duration')
+
+            if trip.actual_duration is None and trip.started_at:
+                duration_delta = timezone.now() - trip.started_at
+                trip.actual_duration = int(duration_delta.total_seconds() / 60)
+
+            trip.save()
+
+            points_awarded = trip.award_points()
+
+            profile, _ = UserProfile.objects.get_or_create(user=request.user)
+
+            response_data = {
+                'trip': self.get_serializer(trip).data,
+                'points_awarded': points_awarded,
+                'points_breakdown': {
+                    'base_points': trip.points_earned,
+                    'bonus_points': trip.bonus_points,
+                    'reasons': trip.points_reason.split('; ') if trip.points_reason else []
+                },
+                'user_profile': UserProfileSerializer(profile).data,
+                'achievements': self._check_achievements(profile, trip)
+            }
+
+            return Response(response_data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])  # This also needs to be indented as part of the class
+    def cancel_trip(self, request, pk=None):
+        """Cancel an active trip"""
+        trip = self.get_object()
+
+        if trip.status != 'active':
+            return Response({'error': 'Trip is not active'}, status=status.HTTP_400_BAD_REQUEST)
+
+        trip.status = 'cancelled'
+        trip.cancelled_at = timezone.now()
+        trip.cancellation_reason = request.data.get('reason', 'user_cancelled')
+        trip.save()
+
+        serializer = self.get_serializer(trip)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def _check_achievements(self, profile, trip):
+        """Check for new achievements"""
+        achievements = []
+
+        # First trip
+        if Trip.objects.filter(user=profile.user, status='completed').count() == 1:
+            achievements.append({
+                'title': 'First Journey',
+                'description': 'Completed your first trip!',
+                'icon': '🚗'
+            })
+
+        total_distance = sum(
+            t.actual_distance or 0
+            for t in Trip.objects.filter(user=profile.user, status='completed')
+        )
+
+        distance_milestones = [100, 500, 1000, 5000, 10000]
+        for milestone in distance_milestones:
+            if total_distance >= milestone and (total_distance - (trip.actual_distance or 0)) < milestone:
+                achievements.append({
+                    'title': f'{milestone}km Explorer',
+                    'description': f'Traveled {milestone}km in total!',
+                    'icon': '🏆'
+                })
+
+        if hasattr(profile, '_previous_tier') and profile.loyalty_tier != profile._previous_tier:
+            tier_names = {
+                'silver': 'Silver',
+                'gold': 'Gold',
+                'platinum': 'Platinum',
+                'diamond': 'Diamond'
+            }
+            achievements.append({
+                'title': f'{tier_names.get(profile.loyalty_tier, "New Tier")} Status',
+                'description': f'Upgraded to {tier_names.get(profile.loyalty_tier)} tier!',
+                'icon': '⭐'
+            })
+
+        return achievements
+
+
+class UserProfileViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = UserProfileSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return UserProfile.objects.filter(user=self.request.user)
+    
+    @action(detail=False, methods=['get'])
+    def my_profile(self, request):
+        """Get current user's profile"""
+        profile, created = UserProfile.objects.get_or_create(user=request.user)
+        serializer = self.get_serializer(profile)
+        return Response(serializer.data)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def toggle_favorite(request):
+    data = request.data
+    place_id = data.get('station_id')
+    name = data.get('name')
+    latitude = data.get('latitude')
+    longitude = data.get('longitude')
+    address = data.get('address', '')
+    city = data.get('city', '')
+    state = data.get('state', '')
+    postal_code = data.get('postal_code', '')
+    country = data.get('country', '')
+
+    if not place_id or not name or latitude is None or longitude is None:
+        return Response({'error': 'Missing required station data.'}, status=400)
+
+    # Get or create the PetrolStation
+    station, _ = PetrolStation.objects.get_or_create(
+        google_place_id=place_id,
+        defaults={
+            'name': name,
+            'latitude': latitude,
+            'longitude': longitude,
+            'address': address,
+            'city': city,
+            'state': state,
+            'postal_code': postal_code,
+            'country': country,
+        }
+    )
+
+    try:
+        favorite, created = Favorite.objects.get_or_create(user=request.user, station=station)
+        if not created:
+            # Already favorited: remove favorite
+            favorite.delete()
+            return Response({'favorited': False, 'station_id': place_id})
+        else:
+            return Response({'favorited': True, 'station_id': place_id})
+    except IntegrityError:
+        # This should be rare if unique constraint exists
+        return Response({'error': 'Could not toggle favorite due to a conflict.'}, status=409)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def user_favorites(request):
+    favorites = Favorite.objects.filter(user=request.user).values('google_place_id')
+    
+    result = list(favorites)
+    return Response({'favorites': result})
+
+
+#Trip history section
+
+class TripHistoryView(generics.ListAPIView):
+    """Get user's completed/cancelled trip history grouped by month"""
+    serializer_class = TripSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return Trip.objects.filter(
+            user=self.request.user,
+            status__in=['completed', 'cancelled']
+        ).order_by('-started_at')
+    
+    def list(self, request, *args, **kwargs):
+        trips = self.get_queryset()
+        
+        # Group trips by month/year
+        trips_by_month = defaultdict(list)
+        
+        for trip in trips:
+            # Use completed_at for completed trips, cancelled_at for cancelled, or started_at as fallback
+            date_to_use = trip.completed_at or trip.cancelled_at or trip.started_at
+            if date_to_use:
+                month_year = f"{calendar.month_name[date_to_use.month]} {date_to_use.year}"
+                trips_by_month[month_year].append(trip)
+        
+        # Format response - sort by year/month (most recent first)
+        response_data = []
+        
+        # Sort the months by date (most recent first)
+        sorted_months = sorted(trips_by_month.items(), 
+                             key=lambda x: (int(x[0].split()[1]), 
+                                          list(calendar.month_name).index(x[0].split()[0])), 
+                             reverse=True)
+        
+        for month_year, month_trips in sorted_months:
+            month_name, year = month_year.split(' ')
+            response_data.append({
+                'month': month_name,
+                'year': int(year),
+                'rides': TripSerializer(month_trips, many=True).data
+            })
+        
+        return Response(response_data)
+
+class UpcomingTripsView(generics.ListAPIView):
+    """Get user's active/upcoming trips"""
+    serializer_class = TripSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return Trip.objects.filter(
+            user=self.request.user,
+            status='active'
+        ).order_by('started_at')
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def start_trip(request):
+    """Start a new trip"""
+    try:
+        data = request.data
+        
+        # Extract route information
+        start_address = data.get('start_address')
+        start_lat = data.get('start_latitude')
+        start_lng = data.get('start_longitude')
+        dest_address = data.get('destination_address')
+        dest_lat = data.get('destination_latitude')
+        dest_lng = data.get('destination_longitude')
+        planned_distance = data.get('planned_distance', 0) / 1000  # Convert from meters to km
+        planned_duration = data.get('planned_duration', 0) / 60  # Convert from seconds to minutes
+        route_data = data.get('route_data', {})
+        
+        # Create trip
+        trip = Trip.objects.create(
+            user=request.user,
+            start_address=start_address,
+            start_latitude=start_lat,
+            start_longitude=start_lng,
+            destination_address=dest_address,
+            destination_latitude=dest_lat,
+            destination_longitude=dest_lng,
+            planned_distance=planned_distance,
+            planned_duration=planned_duration,
+            route_data=route_data,
+            status='active'
+        )
+        
+        return Response({
+            'trip_id': trip.id,
+            'message': 'Trip started successfully'
+        }, status=status.HTTP_201_CREATED)
+        
+    except Exception as e:
+        return Response({
+            'error': f'Failed to start trip: {str(e)}'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def complete_trip(request, trip_id):
+    """Complete an active trip"""
+    try:
+        trip = Trip.objects.get(
+            id=trip_id,
+            user=request.user,
+            status='active'
+        )
+        
+        data = request.data
+        actual_distance = data.get('actual_distance', 0) / 1000  # Convert from meters to km
+        actual_duration = data.get('actual_duration', 0) / 60  # Convert from seconds to minutes
+        
+        # Update trip
+        trip.status = 'completed'
+        trip.completed_at = timezone.now()
+        trip.actual_distance = actual_distance
+        trip.actual_duration = actual_duration
+        
+        # Calculate points
+        total_points = trip.calculate_points()
+        trip.save()
+        
+        return Response({
+            'message': 'Trip completed successfully',
+            'points_earned': trip.points_earned,
+            'bonus_points': trip.bonus_points,
+            'total_points': total_points,
+            'points_reason': trip.points_reason
+        })
+        
+    except Trip.DoesNotExist:
+        return Response({
+            'error': 'Trip not found or not active'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({
+            'error': f'Failed to complete trip: {str(e)}'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def cancel_trip(request, trip_id):
+    """Cancel an active trip"""
+    try:
+        trip = Trip.objects.get(
+            id=trip_id,
+            user=request.user,
+            status='active'
+        )
+        
+        data = request.data
+        cancellation_reason = data.get('reason', 'user_cancelled')
+        
+        # Update trip
+        trip.status = 'cancelled'
+        trip.cancelled_at = timezone.now()
+        trip.cancellation_reason = cancellation_reason
+        trip.save()
+        
+        return Response({
+            'message': 'Trip cancelled successfully'
+        })
+        
+    except Trip.DoesNotExist:
+        return Response({
+            'error': 'Trip not found or not active'
+        }, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({
+            'error': f'Failed to cancel trip: {str(e)}'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def trip_stats(request):
+    """Get user's trip statistics"""
+    user_trips = Trip.objects.filter(user=request.user)
+    
+    total_trips = user_trips.count()
+    completed_trips = user_trips.filter(status='completed').count()
+    cancelled_trips = user_trips.filter(status='cancelled').count()
+    active_trips = user_trips.filter(status='active').count()
+    
+    total_distance = sum(
+        trip.actual_distance or 0 
+        for trip in user_trips.filter(status='completed')
+    )
+    
+    total_points = sum(
+        (trip.points_earned + trip.bonus_points) 
+        for trip in user_trips.filter(status='completed')
+    )
+    
+    return Response({
+        'total_trips': total_trips,
+        'completed_trips': completed_trips,
+        'cancelled_trips': cancelled_trips,
+        'active_trips': active_trips,
+        'total_distance_km': round(total_distance, 1),
+        'total_points': total_points
+    })
+
+class UserFavoriteStationsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        favorites = Favorite.objects.filter(user=request.user).select_related('station')
+        serializer = FavoriteStationSerializer(favorites, many=True)
+        return Response(serializer.data)
+    
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_profile(request):
+    """Get current user's profile data"""
+    print("Fetching user profile data")
+    logger.info(f"Profile fetch request from user: {request.user.username}")
+    try:
+        user = request.user
+        serializer = ProfileSerializer(user, context={'request': request})
+        return Response(serializer.data, status=200)
+        
+    except Exception as e:
+        logger.error(f"Profile fetch error: {str(e)}")
+        return Response({
+            "error": "Failed to fetch profile data"
+        }, status=500)
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def update_profile_data(request):
+    print("Updating user profile data")
+    print(f"Request data: {request.data}")
+    logger.info(f"Profile update request from user: {request.user.username}")
+    """Update user profile data"""
+    try:
+        user = request.user
+        
+        # Log the incoming data for debugging
+        logger.info(f"Profile update request from {user.username}: {request.data}")
+        
+        # Use partial update
+        serializer = ProfileSerializer(user, data=request.data, partial=True)
+        
+        if serializer.is_valid():
+            updated_user = serializer.save()
+            logger.info(f"Profile updated successfully for user {user.username}")
+            
+            # Return updated user data
+            return Response(ProfileSerializer(updated_user).data, status=200)
+        else:
+            logger.warning(f"Profile update validation errors: {serializer.errors}")
+            return Response({
+                "error": "Validation failed",
+                "details": serializer.errors
+            }, status=400)
+            
+    except Exception as e:
+        logger.error(f"Profile update error: {str(e)}")
+        return Response({
+            "error": "Failed to update profile"
+        }, status=500)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_profile_picture(request):
+    """Delete user's profile picture"""
+    try:
+        user = request.user
+        
+        if user.profile_picture:
+            # Delete the file from storage
+            user.profile_picture.delete(save=False)
+            user.profile_picture = None
+            user.save(update_fields=['profile_picture'])
+            
+            logger.info(f"Profile picture deleted for user {user.username}")
+            
+            return Response({
+                "success": True,
+                "message": "Profile picture deleted successfully"
+            }, status=200)
+        else:
+            return Response({
+                "error": "No profile picture to delete"
+            }, status=400)
+            
+    except Exception as e:
+        logger.error(f"Profile picture deletion error: {str(e)}")
+        return Response({
+            "error": "Failed to delete profile picture"
+        }, status=500)

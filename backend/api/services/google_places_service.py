@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class GooglePlacesService:
     def __init__(self):
-        self.gmaps = googlemaps.Client('AIzaSyBaAEWhPar9iLI0xkMjL3uIvJ81Z9y8FAA')
+        self.gmaps = googlemaps.Client('AIzaSyC6HAREudAh22_9dByPF-20I1HDvJBFdb8')
         self.session = requests.Session()
     
     def find_nearby_stations(self, lat: float, lng: float, radius: int = 25000) -> List[Dict]:

@@ -64,11 +64,11 @@ class FuelPriceService:
         """Fetch prices from government sources like EIA"""
         try:
             # U.S. Energy Information Administration API
-            api_key = settings.EIA_API_KEY
+            api_key = 'hjbesmdu3nzDQ90fT8DFnWHOeMYxyNYptwI3XMfN'
             url = f"https://api.eia.gov/v2/petroleum/pri/gnd/data/"
             
             params = {
-                'api_key': api_key,
+                'api_key': 'hjbesmdu3nzDQ90fT8DFnWHOeMYxyNYptwI3XMfN',
                 'frequency': 'weekly',
                 'data[0]': 'value',
                 'facets[product][]': 'EPM0',  # Regular gasoline
@@ -79,6 +79,8 @@ class FuelPriceService:
             }
             
             response = requests.get(url, params=params, timeout=10)
+            print(f"Fetching EIA prices for station: {station.name} with params: {params}")
+            logger.info(f"Fetching EIA prices for station: {station.name} with params: {params}")
             if response.status_code == 200:
                 return self._process_eia_data(response.json(), station)
         except Exception as e:

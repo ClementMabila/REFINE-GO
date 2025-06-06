@@ -92,7 +92,7 @@ class FuelCompany(models.Model):
 
 class PetrolStation(models.Model):
     """Main model for petrol stations with location and basic information"""
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    google_place_id = models.CharField(max_length=100, primary_key=True)
     name = models.CharField(max_length=100)
     company = models.ForeignKey(FuelCompany, on_delete=models.SET_NULL, null=True, related_name='stations')
     address = models.CharField(max_length=255)
@@ -113,7 +113,6 @@ class PetrolStation(models.Model):
     has_shop = models.BooleanField(default=False)
     has_coffee = models.BooleanField(default=False)
     has_ev_charging = models.BooleanField(default=False)
-    google_place_id = models.CharField(max_length=100, unique=True, null=True, blank=True)
     google_rating = models.FloatField(null=True, blank=True)
     google_user_ratings_total = models.IntegerField(null=True, blank=True)
     last_google_sync = models.DateTimeField(null=True, blank=True)
@@ -327,8 +326,21 @@ class Favorite(models.Model):
     """User's favorite petrol stations"""
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='favorites')
     station = models.ForeignKey(PetrolStation, on_delete=models.CASCADE, related_name='favorited_by')
+    google_place_id = models.CharField(max_length=250, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     notes = models.TextField(blank=True)
+
+    def save(self, *args, **kwargs):
+        # Automatically set google_place_id from station if not manually set
+        if self.station and not self.google_place_id:
+            self.google_place_id = self.station.google_place_id
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.user.username}'s favorite: {self.station.name}"
+
+    class Meta:
+        unique_together = ['user', 'station']
     
     def __str__(self):
         return f"{self.user.username}'s favorite: {self.station.name}"
@@ -404,9 +416,26 @@ class TripPlan(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
+    def start_trip(self, vehicle):
+        """Convert trip plan to active trip"""
+        trip = Trip.objects.create(
+            user=self.user,
+            vehicle=vehicle,
+            start_address=self.start_address,
+            start_latitude=self.start_latitude,
+            start_longitude=self.start_longitude,
+            destination_address=self.destination_address,
+            destination_latitude=self.destination_latitude,
+            destination_longitude=self.destination_longitude,
+            planned_distance=self.total_distance,
+            planned_duration=60,  # You can calculate this from route data
+            status='active'
+        )
+        return trip
+
     def __str__(self):
         return f"{self.user.username}'s trip from {self.start_address} to {self.destination_address}"
-
+ 
 
 class RefuelStop(models.Model):
     """Suggested refueling stops for a trip plan"""
@@ -540,3 +569,232 @@ class UserSubscription(models.Model):
     
     def __str__(self):
         return f"{self.user.username}'s {self.subscription_type} subscription"
+    
+#TRIPS RELATED MODELS
+
+class UserProfile(models.Model):
+    """Extended user profile with points and loyalty tier"""
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    total_points = models.IntegerField(default=0)
+    lifetime_points = models.IntegerField(default=0)
+    loyalty_tier = models.CharField(
+        max_length=20,
+        choices=[
+            ('bronze', 'Bronze'),
+            ('silver', 'Silver'),
+            ('gold', 'Gold'),
+            ('platinum', 'Platinum'),
+            ('diamond', 'Diamond')
+        ],
+        default='bronze'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def calculate_loyalty_tier(self):
+        """Calculate tier based on lifetime points"""
+        if self.lifetime_points >= 50000:
+            return 'diamond'
+        elif self.lifetime_points >= 25000:
+            return 'platinum'
+        elif self.lifetime_points >= 10000:
+            return 'gold'
+        elif self.lifetime_points >= 5000:
+            return 'silver'
+        else:
+            return 'bronze'
+    
+    def get_discount_percentage(self):
+        """Get discount percentage based on tier"""
+        tier_discounts = {
+            'bronze': 0,
+            'silver': 5,
+            'gold': 10,
+            'platinum': 15,
+            'diamond': 20
+        }
+        return tier_discounts.get(self.loyalty_tier, 0)
+    
+    def save(self, *args, **kwargs):
+        self.loyalty_tier = self.calculate_loyalty_tier()
+        super().save(*args, **kwargs)
+
+class Trip(models.Model):
+    """Completed or cancelled trip records"""
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('completed', 'Completed'),
+        ('cancelled', 'Cancelled'),
+    ]
+    
+    CANCELLATION_REASONS = [
+        ('user_cancelled', 'User Cancelled'),
+        ('route_changed', 'Route Changed'),
+        ('destination_changed', 'Destination Changed'),
+        ('technical_issue', 'Technical Issue'),
+        ('other', 'Other')
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='trips')
+    vehicle = models.ForeignKey('Vehicle', on_delete=models.CASCADE, related_name='trips', null=True, blank=True)
+    
+    # Origin details
+    start_address = models.CharField(max_length=255)
+    start_latitude = models.DecimalField(max_digits=9, decimal_places=6)
+    start_longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    
+    # Destination details
+    destination_address = models.CharField(max_length=255)
+    destination_latitude = models.DecimalField(max_digits=9, decimal_places=6)
+    destination_longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    
+    # Trip metrics
+    planned_distance = models.DecimalField(max_digits=8, decimal_places=2, help_text="Planned distance in km")
+    actual_distance = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True, help_text="Actual distance in km")
+    planned_duration = models.IntegerField(help_text="Planned duration in minutes")
+    actual_duration = models.IntegerField(null=True, blank=True, help_text="Actual duration in minutes")
+    
+    # Trip status and timing
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='active')
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancellation_reason = models.CharField(max_length=50, choices=CANCELLATION_REASONS, null=True, blank=True)
+    
+    # Points and rewards
+    points_earned = models.IntegerField(default=0)
+    bonus_points = models.IntegerField(default=0)
+    points_reason = models.TextField(blank=True)
+    
+    # Route data (stored as JSON)
+    route_data = models.JSONField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"{self.user.username}'s {self.status} trip - {self.start_address} to {self.destination_address}"
+    
+    def calculate_points(self):
+        """Smart point calculation based on various factors"""
+        if self.status != 'completed':
+            return 0
+        
+        base_points = 0
+        bonus_points = 0
+        reasons = []
+        
+        # Base points: 1 point per km
+        if self.actual_distance:
+            base_points = int(self.actual_distance)
+            reasons.append(f"{int(self.actual_distance)} km completed")
+        
+        # Distance bonus
+        if self.actual_distance and self.actual_distance >= 100:
+            bonus_points += 50
+            reasons.append("Long distance bonus (+50)")
+        elif self.actual_distance and self.actual_distance >= 50:
+            bonus_points += 20
+            reasons.append("Medium distance bonus (+20)")
+        
+        # Efficiency bonus (completed within planned time + 20%)
+        if self.actual_duration and self.planned_duration:
+            efficiency_threshold = self.planned_duration * 1.2
+            if self.actual_duration <= efficiency_threshold:
+                bonus_points += 30
+                reasons.append("Efficient travel bonus (+30)")
+        
+        # Streak bonus (consecutive completed trips)
+        recent_completed = Trip.objects.filter(
+            user=self.user,
+            status='completed',
+            completed_at__gte=self.started_at - models.DateRange(days=7)
+        ).count()
+        
+        if recent_completed >= 5:
+            bonus_points += 100
+            reasons.append("Weekly streak bonus (+100)")
+        elif recent_completed >= 3:
+            bonus_points += 50
+            reasons.append("Triple trip bonus (+50)")
+        
+        # Weekend bonus
+        if self.started_at.weekday() >= 5:  # Saturday or Sunday
+            bonus_points += 25
+            reasons.append("Weekend warrior bonus (+25)")
+        
+        # Peak hours avoidance bonus (avoiding 7-9 AM and 5-7 PM)
+        start_hour = self.started_at.hour
+        if not (7 <= start_hour <= 9 or 17 <= start_hour <= 19):
+            bonus_points += 15
+            reasons.append("Off-peak travel bonus (+15)")
+        
+        total_points = base_points + bonus_points
+        
+        self.points_earned = base_points
+        self.bonus_points = bonus_points
+        self.points_reason = "; ".join(reasons)
+        
+        return total_points
+    
+    def award_points(self):
+        """Award points to user profile"""
+        if self.status == 'completed' and self.points_earned == 0:
+            total_points = self.calculate_points()
+            
+            # Update user profile
+            profile, created = UserProfile.objects.get_or_create(user=self.user)
+            profile.total_points += total_points
+            profile.lifetime_points += total_points
+            profile.save()
+            
+            self.save()
+            
+            return total_points
+        return 0
+
+class TripWaypoint(models.Model):
+    """Waypoints/stops during a trip"""
+    trip = models.ForeignKey(Trip, on_delete=models.CASCADE, related_name='waypoints')
+    petrol_station = models.ForeignKey('PetrolStation', on_delete=models.CASCADE, null=True, blank=True)
+    
+    address = models.CharField(max_length=255)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    
+    planned_arrival = models.DateTimeField(null=True, blank=True)
+    actual_arrival = models.DateTimeField(null=True, blank=True)
+    departure_time = models.DateTimeField(null=True, blank=True)
+    
+    fuel_purchased = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    amount_spent = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    discount_applied = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    
+    order = models.PositiveIntegerField(default=0)
+    
+    class Meta:
+        ordering = ['order']
+
+class PointsTransaction(models.Model):
+    """Track all points transactions"""
+    TRANSACTION_TYPES = [
+        ('earned', 'Points Earned'),
+        ('redeemed', 'Points Redeemed'),
+        ('expired', 'Points Expired'),
+        ('bonus', 'Bonus Points'),
+        ('refund', 'Refund'),
+    ]
+    
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='points_transactions')
+    trip = models.ForeignKey(Trip, on_delete=models.CASCADE, null=True, blank=True)
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
+    points = models.IntegerField()
+    description = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-created_at']
