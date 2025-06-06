@@ -21,7 +21,7 @@ type RegisterData = z.infer<typeof RegisterSchema>;
 type OtpData = z.infer<typeof OtpSchema>;
 
 // API configuration
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://refine-go.onrender.com/api';
 
 export default function RegisterPage() {
   const [step, setStep] = useState<"form" | "otp">("form");
