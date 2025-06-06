@@ -54,7 +54,7 @@ const ProfilePage = () => {
 
   const [user, setUser] = useState<User | null>(null);
   const [csrfToken, setCsrfToken] = useState("");
-  const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://refine-go.onrender.com/api';
+  const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://refine-go.onrender.com';
   
     useEffect(() => {
     const fetchCsrfAndUser = async () => {
