@@ -18,3 +18,15 @@ celery[redis]>=5.3.0
 
 # Monitoring and logging
 sentry-sdk>=1.32.0  # Optional: for error tracking
+
+geographiclib==2.0
+geopy==2.4.1
+googlemaps==4.10.0
+gunicorn==23.0.0
+idna==3.10Add commentMore actions
+kombu==5.5.3
+numpy==2.2.6
+packaging==25.0
+pillow==11.2.1
+prompt_toolkit==3.0.51
+psycopg2==2.9.10
