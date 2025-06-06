@@ -20,7 +20,7 @@ const FavoritesModal: React.FC<FavoritesModalProps> = ({ showModal, onClose }) =
   const [loading, setLoading] = useState(true);
   const [csrfToken, setCsrfToken] = useState("");
   
-  const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://refine-go.onrender.com/api';
   
   interface TruncateFn {
     (text: string, limit?: number): string;
