@@ -54,3 +54,4 @@ packaging==25.0
 pillow==11.2.1
 prompt_toolkit==3.0.51
 psycopg2==2.9.10
+whitenoise>=6.6.0
