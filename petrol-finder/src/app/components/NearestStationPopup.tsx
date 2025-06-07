@@ -145,10 +145,6 @@ const NearestStationPopup = ({
                   </div>
                 </div>
                 <div className="text-right ml-3">
-                  <div className="text-lg font-bold text-[#2edda2]">
-                    {station.regularPrice ? `R${station.regularPrice.toFixed(2)}` : 'N/A'}
-                  </div>
-                  <div className="text-xs text-gray-500">per litre</div>
                 </div>
               </div>
 
