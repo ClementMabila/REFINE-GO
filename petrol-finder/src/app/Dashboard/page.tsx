@@ -386,7 +386,6 @@ const PetrolFinderPage = () => {
     }, []);
 
   async function fetchUser() {
-  setLoading(true);
   setError(null);
   try {
     const res = await fetch(`${API_BASE_URL}/api/logged_user`, {
