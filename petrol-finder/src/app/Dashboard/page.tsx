@@ -2437,11 +2437,8 @@ const NavigationButton = () => (
             {/* Logo and title */}
             <div className="flex items-center space-x-2">
               <div className="flex items-center space-x-3">
-              <div className={`w-8 h-8 rounded-lg ${darkMode ? 'bg-white' : 'bg-[#2edda2]'} flex items-center justify-center`}>
-                <span className={`font-bold text-sm ${darkMode ? 'text-black' : 'text-white'}`}>R</span>
-              </div>
-              <h1 className="text-xl font-bold bg-[#2edda2] bg-clip-text text-transparent">
-                RefineGo
+              <h1 className="text-[30px] font-normal bg-[#2edda2] bg-clip-text text-transparent">
+                refinego
               </h1>
             </div>
             </div>
