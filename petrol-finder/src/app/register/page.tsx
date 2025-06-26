@@ -220,7 +220,7 @@ export default function RegisterPage() {
       <div className="max-w-md mx-auto px-6 py-16">
         {/* Hero Section */}
         <div className="text-center mb-12">
-          <h2 className="text-3xl font-semibold mb-3">
+          <h2 className="text-3xl font-normal mb-3">
             {step === "form" ? (
               <>
                 Create{' '}
