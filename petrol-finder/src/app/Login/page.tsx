@@ -192,7 +192,7 @@ export default function LoginPage() {
           <h2 className="text-3xl font-normal mb-3">
             {step === "form" ? (
               <><span className="bg-[#2edda2] bg-clip-text text-transparent">
-                Welcome back Eyo!</span> Lets get you logged In
+                Welcome back</span> Lets get you logged In
               </>
             ) : (
               <>
